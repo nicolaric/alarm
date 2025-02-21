@@ -5,6 +5,7 @@ const math = std.math;
 const fmt = std.fmt;
 const posix = std.posix;
 const termios = posix.termios;
+const c = std.c;
 
 const Dot = struct { row: i32, col: i32 };
 
@@ -164,29 +165,30 @@ const circle = &[_]Dot{
     .{ .row = 24, .col = 5 },
     .{ .row = 23, .col = 4 },
     .{ .row = 22, .col = 3 },
-    .{ .row = 21, .col = 2 },
+    .{ .row = 21, .col = 3 },
     .{ .row = 20, .col = 2 },
     .{ .row = 19, .col = 2 },
-    .{ .row = 18, .col = 1 },
+    .{ .row = 18, .col = 2 },
     .{ .row = 17, .col = 1 },
     .{ .row = 16, .col = 1 },
     .{ .row = 15, .col = 1 },
     .{ .row = 14, .col = 1 },
     .{ .row = 13, .col = 1 },
     .{ .row = 12, .col = 1 },
-    .{ .row = 11, .col = 2 },
+    .{ .row = 11, .col = 1 },
     .{ .row = 10, .col = 2 },
     .{ .row = 9, .col = 2 },
-    .{ .row = 8, .col = 3 },
+    .{ .row = 8, .col = 2 },
     .{ .row = 7, .col = 3 },
-    .{ .row = 6, .col = 4 },
-    .{ .row = 5, .col = 5 },
-    .{ .row = 4, .col = 6 },
-    .{ .row = 3, .col = 7 },
-    .{ .row = 3, .col = 8 },
-    .{ .row = 2, .col = 9 },
-    .{ .row = 2, .col = 10 },
-    .{ .row = 2, .col = 11 },
+    .{ .row = 6, .col = 3 },
+    .{ .row = 5, .col = 4 },
+    .{ .row = 4, .col = 5 },
+    .{ .row = 3, .col = 6 },
+    .{ .row = 2, .col = 7 },
+    .{ .row = 2, .col = 8 },
+    .{ .row = 1, .col = 9 },
+    .{ .row = 1, .col = 10 },
+    .{ .row = 1, .col = 11 },
 };
 
 const State = enum { TIME, TIMER_STATE, SET_TIME };
@@ -245,8 +247,8 @@ fn isDotLit(row: usize, col: usize) bool {
                 const pos = digitPositions[i];
                 for (pattern) |dot| {
                     const r = pos.row_offset + dot.row;
-                    const c = pos.col_offset + dot.col;
-                    if (r == row and c == col) return true;
+                    const co = pos.col_offset + dot.col;
+                    if (r == row and co == col) return true;
                 }
             }
         },
@@ -256,8 +258,8 @@ fn isDotLit(row: usize, col: usize) bool {
                 const pos = digitPositions[i];
                 for (pattern) |dot| {
                     const r = pos.row_offset + dot.row;
-                    const c = pos.col_offset + dot.col;
-                    if (r == row and c == col) return true;
+                    const co = pos.col_offset + dot.col;
+                    if (r == row and co == col) return true;
                 }
             }
         },
@@ -348,15 +350,37 @@ fn right() void {
 
 pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
+    //const stdin = std.io.getStdIn().reader();
 
-    // Optionally, you can remove terminal raw mode settings if you're not processing input.
-    // For now, we only hide the cursor:
+    // Get the current terminal settings
+    const original_termios = try posix.tcgetattr(posix.STDIN_FILENO);
+    defer posix.tcsetattr(posix.STDIN_FILENO, .FLUSH, original_termios) catch {};
+
+    // Set up raw mode using C constants
+    //var raw = original_termios;
+    //raw.lflag &= ~@as(c.tc_lflag_t, c.system.ICANON | c.system.ECHO); // Use c.ICANON/c.ECHO
+    //raw.cc[c.VMIN] = 0; // Non-blocking reads
+    //raw.cc[c.VTIME] = 0; // No timeout
+    //try posix.tcsetattr(posix.STDIN_FILENO, .FLUSH, raw);
+
     try stdout.writeAll("\x1b[?25l"); // Hide cursor
-
+    //
     var timer = try time.Timer.start();
     var last_redraw: u64 = 0;
+    //var buffer: [1]u8 = undefined;
 
     while (true) {
+        // Try to read a byte from stdin.
+        //const n = try stdin.read(&buffer);
+        //if (n > 0) {
+        // A keystroke was received.
+        // You can handle it here (for example, exit if 'q' is pressed).
+        //if (buffer[0] == 'q') break;
+        //try stdout.writeAll("Key pressed: ");
+        //try stdout.writeAll(&buffer);
+        //try stdout.writeAll("\n");
+        //}
+
         // Update display
         const now = timer.read();
         if (now - last_redraw > time.ns_per_s / 2) {
@@ -375,6 +399,7 @@ pub fn main() !void {
             try redraw(stdout);
         }
 
+        // Do other periodic tasks, e.g. updating display...
         time.sleep(10 * time.ns_per_ms);
     }
 }
