@@ -5,7 +5,6 @@ const math = std.math;
 const fmt = std.fmt;
 const posix = std.posix;
 const termios = posix.termios;
-const c = std.c;
 
 const Dot = struct { row: i32, col: i32 };
 
@@ -196,26 +195,38 @@ const State = enum { TIME, TIMER_STATE, SET_TIME };
 var mode: State = .TIME;
 var alarmState: enum { on, off } = .off;
 var settingHours: bool = true;
-var alarmTime: struct { hours: ?u8 = null, minutes: ?u8 = null } = .{};
+var alarmTime: struct { hours: ?u8 = null, minutes: ?u8 = null, seconds: ?u8 = null } = .{};
 var hoursVisible: bool = true;
 var minutesVisible: bool = true;
 var lastBlink: u64 = 0;
+const totalTime = 60 * time.ns_per_s; // 1 minute in nanoseconds
+const timePerDot = totalTime / circle.len;
 
-fn getCurrentTime() struct { hours: u8, minutes: u8 } {
+fn getCurrentTime() struct { hours: u8, minutes: u8, seconds: u8 } {
     const now = std.time.timestamp();
     const t = std.time.epoch.EpochSeconds{ .secs = @intCast(now) };
     const tm = t.getDaySeconds();
-    //const tm = t.secondsToLocalTime();
     return .{
         .hours = tm.getHoursIntoDay(),
         .minutes = tm.getMinutesIntoHour(),
+        .seconds = tm.getSecondsIntoMinute(),
     };
 }
 
 fn isDotLit(row: usize, col: usize) bool {
+    const current = getCurrentTime();
+    const hours = if (mode == .TIME) current.hours else if (mode == .SET_TIME and !hoursVisible) null else alarmTime.hours orelse current.hours;
+    const minutes = if (mode == .TIME) current.minutes else if (mode == .SET_TIME and !minutesVisible) null else alarmTime.minutes orelse current.minutes;
+    const seconds = if (mode == .TIME) current.seconds else if (mode == .SET_TIME and !minutesVisible) null else alarmTime.seconds orelse current.seconds;
+
+    const minuteEven = (minutes orelse 0) % 2 == 0;
+
     // Check circle
-    for (circle) |dot| {
-        if (dot.row == row and dot.col == col) return true;
+    for (circle, 0..) |dot, index| {
+        const mappedSecond = (index * 60) / circle.len;
+        const minuteEvenDotVisible = minuteEven and mappedSecond < (seconds orelse 0);
+        const minuteOddDotVisible = !minuteEven and mappedSecond > (seconds orelse 0);
+        if (dot.row == row and dot.col == col and (minuteEvenDotVisible or minuteOddDotVisible)) return true;
     }
 
     if (col < 9 or col == 14 or col > 20) return false;
@@ -230,10 +241,6 @@ fn isDotLit(row: usize, col: usize) bool {
 
     switch (mode) {
         .TIME, .SET_TIME => {
-            const current = getCurrentTime();
-            const hours = if (mode == .SET_TIME and !hoursVisible) null else alarmTime.hours orelse current.hours;
-            const minutes = if (mode == .SET_TIME and !minutesVisible) null else alarmTime.minutes orelse current.minutes;
-
             const digits = [_]?u8{
                 if (hours != null) @divTrunc(hours.?, 10) else null,
                 if (hours != null) @mod(hours.?, 10) else null,
@@ -280,7 +287,7 @@ fn redraw(writer: anytype) !void {
 
     for (0..31) |row| {
         for (0..31) |col| {
-            try writer.writeAll(if (grid[row][col]) "█" else " ");
+            try writer.writeAll(if (grid[row][col]) "██" else "  ");
         }
         try writer.writeAll("\n");
     }
@@ -289,8 +296,8 @@ fn redraw(writer: anytype) !void {
 fn handleInput(key: u8) void {
     switch (key) {
         'a' => left(),
-        's' => center(),
-        'd' => right(),
+        'r' => center(),
+        's' => right(),
         else => {},
     }
 }
@@ -350,53 +357,54 @@ fn right() void {
 
 pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
-    //const stdin = std.io.getStdIn().reader();
+    const stdin = std.io.getStdIn().reader();
 
-    // Get the current terminal settings
-    const original_termios = try posix.tcgetattr(posix.STDIN_FILENO);
-    defer posix.tcsetattr(posix.STDIN_FILENO, .FLUSH, original_termios) catch {};
-
-    // Set up raw mode using C constants
-    //var raw = original_termios;
-    //raw.lflag &= ~@as(c.tc_lflag_t, c.system.ICANON | c.system.ECHO); // Use c.ICANON/c.ECHO
-    //raw.cc[c.VMIN] = 0; // Non-blocking reads
-    //raw.cc[c.VTIME] = 0; // No timeout
-    //try posix.tcsetattr(posix.STDIN_FILENO, .FLUSH, raw);
+    const fd = try posix.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0);
+    const state = try posix.tcgetattr(fd);
+    var raw = state;
+    // see termios(3)
+    raw.lflag.ECHO = false;
+    raw.lflag.ICANON = false;
+    raw.cflag.CSIZE = .CS8;
+    raw.cflag.PARENB = false;
+    raw.cc[@intFromEnum(posix.V.MIN)] = 0;
+    raw.cc[@intFromEnum(posix.V.TIME)] = 0;
+    try posix.tcsetattr(fd, .FLUSH, raw);
 
     try stdout.writeAll("\x1b[?25l"); // Hide cursor
-    //
+
     var timer = try time.Timer.start();
     var last_redraw: u64 = 0;
-    //var buffer: [1]u8 = undefined;
+    var buffer: [1]u8 = undefined;
 
     while (true) {
-        // Try to read a byte from stdin.
-        //const n = try stdin.read(&buffer);
-        //if (n > 0) {
-        // A keystroke was received.
-        // You can handle it here (for example, exit if 'q' is pressed).
-        //if (buffer[0] == 'q') break;
-        //try stdout.writeAll("Key pressed: ");
-        //try stdout.writeAll(&buffer);
-        //try stdout.writeAll("\n");
-        //}
-
         // Update display
         const now = timer.read();
-        if (now - last_redraw > time.ns_per_s / 2) {
-            last_redraw = now;
-            try redraw(stdout);
+        if (mode == .TIME or mode == .TIMER_STATE) {
+            if (now - last_redraw > time.ns_per_s / 2) {
+                last_redraw = now;
+                try redraw(stdout);
+            }
         }
 
         // Handle blinking in SET_TIME mode
-        if (mode == .SET_TIME and now - lastBlink > time.ns_per_s) {
+        if (mode == .SET_TIME and now - lastBlink > 100000000) {
             lastBlink = now;
             if (settingHours) {
                 hoursVisible = !hoursVisible;
+                minutesVisible = true;
             } else {
                 minutesVisible = !minutesVisible;
+                hoursVisible = true;
             }
             try redraw(stdout);
+        }
+
+        const n = try stdin.read(&buffer);
+        if (n > 0) {
+            // A keystroke was received.
+            if (buffer[0] == 'q') break;
+            handleInput(buffer[0]);
         }
 
         // Do other periodic tasks, e.g. updating display...

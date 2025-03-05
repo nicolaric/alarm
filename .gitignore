@@ -1,0 +1,5 @@
+    .zig-cache
+    alarm
+    *.o
+    models
+    .DS_Store
