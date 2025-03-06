@@ -109,9 +109,6 @@ const onOffPatterns = struct {
 };
 
 const circle = &[_]Dot{
-    .{ .row = 0, .col = 11 },
-    .{ .row = 0, .col = 12 },
-    .{ .row = 0, .col = 13 },
     .{ .row = 0, .col = 14 },
     .{ .row = 0, .col = 15 },
     .{ .row = 0, .col = 16 },
@@ -188,7 +185,12 @@ const circle = &[_]Dot{
     .{ .row = 1, .col = 9 },
     .{ .row = 1, .col = 10 },
     .{ .row = 1, .col = 11 },
+    .{ .row = 0, .col = 11 },
+    .{ .row = 0, .col = 12 },
+    .{ .row = 0, .col = 13 },
 };
+
+const onState = .{ .row = 23, .col = 21 };
 
 const State = enum { TIME, TIMER_STATE, SET_TIME };
 
@@ -214,24 +216,6 @@ fn getCurrentTime() struct { hours: u8, minutes: u8, seconds: u8 } {
 }
 
 fn isDotLit(row: usize, col: usize) bool {
-    const current = getCurrentTime();
-    const hours = if (mode == .TIME) current.hours else if (mode == .SET_TIME and !hoursVisible) null else alarmTime.hours orelse current.hours;
-    const minutes = if (mode == .TIME) current.minutes else if (mode == .SET_TIME and !minutesVisible) null else alarmTime.minutes orelse current.minutes;
-    const seconds = if (mode == .TIME) current.seconds else if (mode == .SET_TIME and !minutesVisible) null else alarmTime.seconds orelse current.seconds;
-
-    const minuteEven = (minutes orelse 0) % 2 == 0;
-
-    // Check circle
-    for (circle, 0..) |dot, index| {
-        const mappedSecond = (index * 60) / circle.len;
-        const minuteEvenDotVisible = minuteEven and mappedSecond < (seconds orelse 0);
-        const minuteOddDotVisible = !minuteEven and mappedSecond > (seconds orelse 0);
-        if (dot.row == row and dot.col == col and (minuteEvenDotVisible or minuteOddDotVisible)) return true;
-    }
-
-    if (col < 9 or col == 14 or col > 20) return false;
-    if (row < 5 or row == 14 or row > 24) return false;
-
     const digitPositions = [_]struct { row_offset: i32, col_offset: i32 }{
         .{ .row_offset = 5, .col_offset = 9 }, // Hour tens
         .{ .row_offset = 5, .col_offset = 15 }, // Hour units
@@ -241,6 +225,25 @@ fn isDotLit(row: usize, col: usize) bool {
 
     switch (mode) {
         .TIME, .SET_TIME => {
+            const current = getCurrentTime();
+            const hours = if (mode == .TIME) current.hours else if (mode == .SET_TIME and !hoursVisible) null else alarmTime.hours orelse current.hours;
+            const minutes = if (mode == .TIME) current.minutes else if (mode == .SET_TIME and !minutesVisible) null else alarmTime.minutes orelse current.minutes;
+            const seconds = if (mode == .TIME) current.seconds else if (mode == .SET_TIME and !minutesVisible) null else alarmTime.seconds orelse current.seconds;
+
+            if (mode == .TIME) {
+                const minuteEven = (minutes orelse 0) % 2 == 0;
+
+                // Check circle
+                for (circle, 0..) |dot, index| {
+                    const mappedSecond = (index * 60) / circle.len;
+                    const minuteEvenDotVisible = minuteEven and mappedSecond < (seconds orelse 0);
+                    const minuteOddDotVisible = !minuteEven and mappedSecond > (seconds orelse 0);
+                    if (dot.row == row and dot.col == col and (minuteEvenDotVisible or minuteOddDotVisible)) return true;
+                }
+
+                if (alarmState == .on and row == onState.row and col == onState.col) return true;
+            }
+
             const digits = [_]?u8{
                 if (hours != null) @divTrunc(hours.?, 10) else null,
                 if (hours != null) @mod(hours.?, 10) else null,
@@ -275,22 +278,31 @@ fn isDotLit(row: usize, col: usize) bool {
     return false;
 }
 
+var previous_grid: [31][31]bool = undefined; // Track previous State
+fn updateScreen(writer: anytype, current: *const [31][31]bool) !void {
+    for (0..31) |row| {
+        for (0..31) |col| {
+            if (current[row][col] != previous_grid[row][col]) {
+                // Move cursor to the correct position (1-based for ANSI)
+                try writer.print("\x1b[{};{}H", .{ row + 1, col * 2 + 1 });
+                try writer.writeAll(if (current[row][col]) "██" else "  ");
+            }
+        }
+    }
+    // Move cursor out of the way to prevent flicker
+    try writer.writeAll("\x1b[31;1H");
+    // Update previous_grid to current state
+    @memcpy(&previous_grid, current);
+}
+
 fn redraw(writer: anytype) !void {
-    try writer.writeAll("\x1b[2J\x1b[H"); // Clear screen
-
-    var grid: [31][31]bool = undefined;
+    var current_grid: [31][31]bool = undefined;
     for (0..31) |row| {
         for (0..31) |col| {
-            grid[row][col] = isDotLit(row, col);
+            current_grid[row][col] = isDotLit(row, col);
         }
     }
-
-    for (0..31) |row| {
-        for (0..31) |col| {
-            try writer.writeAll(if (grid[row][col]) "██" else "  ");
-        }
-        try writer.writeAll("\n");
-    }
+    try updateScreen(writer, &current_grid);
 }
 
 fn handleInput(key: u8) void {
@@ -361,6 +373,10 @@ pub fn main() !void {
 
     const fd = try posix.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0);
     const state = try posix.tcgetattr(fd);
+
+    const original_termios = try posix.tcgetattr(fd);
+    defer posix.tcsetattr(fd, .FLUSH, original_termios) catch {}; // Restore on exit
+
     var raw = state;
     // see termios(3)
     raw.lflag.ECHO = false;
@@ -376,6 +392,14 @@ pub fn main() !void {
     var timer = try time.Timer.start();
     var last_redraw: u64 = 0;
     var buffer: [1]u8 = undefined;
+
+    try stdout.writeAll("\x1b[?25l"); // Hide cursor
+    try stdout.writeAll("\x1b[2J");
+
+    // Initialize previous_grid
+    for (&previous_grid) |*row| {
+        @memset(row, false);
+    }
 
     while (true) {
         // Update display
@@ -410,4 +434,6 @@ pub fn main() !void {
         // Do other periodic tasks, e.g. updating display...
         time.sleep(10 * time.ns_per_ms);
     }
+
+    try stdout.writeAll("\x1b[?25h"); // Restore cursor
 }
